@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0-mac.1
+
+- Add a macOS preview package implemented with Python/Tkinter.
+- Support independent Chrome profile directories, proxy import, batch launch/close, group navigation/JS, window arrangement, and the window number/IP badge.
+- Include a minimal `.app` wrapper and `启动.command` launcher for macOS.
+
 ## 1.0.0.4
 
 - Add an in-page badge for each Chrome window with the window number and current public exit IP.
