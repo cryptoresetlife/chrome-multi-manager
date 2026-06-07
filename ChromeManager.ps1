@@ -35,7 +35,7 @@ public class MouseSync {
     public const int WH_MOUSE_LL=14,WH_KEYBOARD_LL=13,
         WM_MOUSEMOVE=0x200,WM_LBUTTONDOWN=0x201,WM_LBUTTONUP=0x202,WM_RBUTTONDOWN=0x204,WM_RBUTTONUP=0x205,
         WM_MOUSEWHEEL=0x20A,WM_LBUTTONDBLCLK=0x203,WM_KEYDOWN=0x100,WM_KEYUP=0x101,WM_CHAR=0x102,
-        WM_SYSKEYDOWN=0x104,WM_SYSKEYUP=0x105,WM_SYSCHAR=0x106;
+        WM_SYSKEYDOWN=0x104,WM_SYSKEYUP=0x105,WM_SYSCHAR=0x106,WM_QUIT=0x12;
     [DllImport("user32.dll",SetLastError=true)] static extern IntPtr SetWindowsHookEx(int id,HookProc fn,IntPtr mod,uint tid);
     [DllImport("user32.dll",SetLastError=true)] static extern bool UnhookWindowsHookEx(IntPtr h);
     [DllImport("user32.dll")] static extern IntPtr CallNextHookEx(IntPtr h,int n,IntPtr w,IntPtr l);
@@ -45,6 +45,9 @@ public class MouseSync {
     [DllImport("user32.dll")] static extern bool ScreenToClient(IntPtr h,ref POINT p);
     [DllImport("user32.dll")] static extern bool ClientToScreen(IntPtr h,ref POINT p);
     [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h,uint m,IntPtr w,IntPtr l);
+    [DllImport("user32.dll")] static extern int GetMessage(out MSG msg,IntPtr h,uint min,uint max);
+    [DllImport("user32.dll")] static extern bool PeekMessage(out MSG msg,IntPtr h,uint min,uint max,uint remove);
+    [DllImport("user32.dll")] static extern bool PostThreadMessage(uint id,uint msg,IntPtr w,IntPtr l);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern short GetKeyState(int vk);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
@@ -52,9 +55,11 @@ public class MouseSync {
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
     [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
     [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
+    [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
     delegate bool EnumWinProc(IntPtr h,IntPtr l);
     [StructLayout(LayoutKind.Sequential)] public struct POINT{public int x,y;}
     [StructLayout(LayoutKind.Sequential)] public struct RECT{public int L,T,R,B;}
+    [StructLayout(LayoutKind.Sequential)] struct MSG{public IntPtr hwnd;public uint message;public IntPtr wParam;public IntPtr lParam;public uint time;public POINT pt;}
     [StructLayout(LayoutKind.Sequential)] struct MSLL{public POINT pt;public uint d,f,t;public IntPtr e;}
     [StructLayout(LayoutKind.Sequential)] struct KBDLL{public uint vk,sc,flags,t;public IntPtr e;}
     public delegate IntPtr HookProc(int n,IntPtr w,IntPtr l);
@@ -103,28 +108,66 @@ public class MouseSync {
         if((GetKeyState(0x10)&0x8000)!=0)m|=8; // Shift
         return m;
     }
-    public static bool StartHook(){
-        StopHook();_mproc=CB;LastMouseHookError=0;
-        _mhook=SetWindowsHookEx(WH_MOUSE_LL,_mproc,GetModuleHandle(null),0);
-        if(_mhook==IntPtr.Zero){
-            LastMouseHookError=Marshal.GetLastWin32Error();
-            _mhook=SetWindowsHookEx(WH_MOUSE_LL,_mproc,IntPtr.Zero,0);
-            if(_mhook==IntPtr.Zero){LastMouseHookError=Marshal.GetLastWin32Error();return false;}
-        }
-        return true;
+    static object _hookLock=new object();
+    static Thread _hookThread; static uint _hookThreadId;
+    static bool _wantMouse,_wantKbd;
+    static ManualResetEvent _hookReady;
+
+    public static bool StartHook(){lock(_hookLock){_wantMouse=true;return RestartHookThread();}}
+    public static void StopHook(){lock(_hookLock){_wantMouse=false;if(_wantKbd)RestartHookThread();else StopHookThread();}}
+    public static bool StartKbdHook(){lock(_hookLock){_wantKbd=true;return RestartHookThread();}}
+    public static void StopKbdHook(){lock(_hookLock){_wantKbd=false;if(_wantMouse)RestartHookThread();else StopHookThread();}}
+
+    static bool RestartHookThread(){
+        StopHookThread();
+        LastMouseHookError=0;LastKeyboardHookError=0;
+        if(!_wantMouse&&!_wantKbd)return true;
+        _hookReady=new ManualResetEvent(false);
+        _hookThread=new Thread(HookLoop);
+        _hookThread.IsBackground=true;
+        _hookThread.Name="ChromeManagerInputHook";
+        _hookThread.Start();
+        if(!_hookReady.WaitOne(3000))return false;
+        return (!_wantMouse||_mhook!=IntPtr.Zero)&&(!_wantKbd||_khook!=IntPtr.Zero);
     }
-    public static void StopHook(){if(_mhook!=IntPtr.Zero){UnhookWindowsHookEx(_mhook);_mhook=IntPtr.Zero;}}
-    public static bool StartKbdHook(){
-        StopKbdHook();_kproc=KbdCB;LastKeyboardHookError=0;
-        _khook=SetWindowsHookEx(WH_KEYBOARD_LL,_kproc,GetModuleHandle(null),0);
-        if(_khook==IntPtr.Zero){
-            LastKeyboardHookError=Marshal.GetLastWin32Error();
-            _khook=SetWindowsHookEx(WH_KEYBOARD_LL,_kproc,IntPtr.Zero,0);
-            if(_khook==IntPtr.Zero){LastKeyboardHookError=Marshal.GetLastWin32Error();return false;}
+    static void StopHookThread(){
+        if(_hookThread!=null&&_hookThread.IsAlive){
+            if(_hookThreadId!=0)PostThreadMessage(_hookThreadId,(uint)WM_QUIT,IntPtr.Zero,IntPtr.Zero);
+            if(!_hookThread.Join(1200))PostThreadMessage(_hookThreadId,(uint)WM_QUIT,IntPtr.Zero,IntPtr.Zero);
         }
-        return true;
+        _hookThread=null;_hookThreadId=0;
     }
-    public static void StopKbdHook(){if(_khook!=IntPtr.Zero){UnhookWindowsHookEx(_khook);_khook=IntPtr.Zero;}}
+    static void HookLoop(){
+        MSG msg;
+        _hookThreadId=GetCurrentThreadId();
+        PeekMessage(out msg,IntPtr.Zero,0,0,0);
+        try{
+            _mproc=CB;_kproc=KbdCB;
+            if(_wantMouse){
+                _mhook=SetWindowsHookEx(WH_MOUSE_LL,_mproc,GetModuleHandle(null),0);
+                if(_mhook==IntPtr.Zero){
+                    LastMouseHookError=Marshal.GetLastWin32Error();
+                    _mhook=SetWindowsHookEx(WH_MOUSE_LL,_mproc,IntPtr.Zero,0);
+                    if(_mhook==IntPtr.Zero)LastMouseHookError=Marshal.GetLastWin32Error();
+                }
+            }
+            if(_wantKbd){
+                _khook=SetWindowsHookEx(WH_KEYBOARD_LL,_kproc,GetModuleHandle(null),0);
+                if(_khook==IntPtr.Zero){
+                    LastKeyboardHookError=Marshal.GetLastWin32Error();
+                    _khook=SetWindowsHookEx(WH_KEYBOARD_LL,_kproc,IntPtr.Zero,0);
+                    if(_khook==IntPtr.Zero)LastKeyboardHookError=Marshal.GetLastWin32Error();
+                }
+            }
+        }finally{
+            if(_hookReady!=null)_hookReady.Set();
+        }
+        try{while(GetMessage(out msg,IntPtr.Zero,0,0)>0){}}
+        finally{
+            if(_mhook!=IntPtr.Zero){UnhookWindowsHookEx(_mhook);_mhook=IntPtr.Zero;}
+            if(_khook!=IntPtr.Zero){UnhookWindowsHookEx(_khook);_khook=IntPtr.Zero;}
+        }
+    }
     static IntPtr CB(int n,IntPtr w,IntPtr l){
         if(n>=0&&MasterHwnd!=IntPtr.Zero){
             var ms=(MSLL)Marshal.PtrToStructure(l,typeof(MSLL));
@@ -189,7 +232,7 @@ public class MouseSync {
         foreach(var c in _wsCon.Values){try{c.Dispose();}catch{}} _wsCon.Clear();
         _ra=true; _rt=new Thread(Relay){IsBackground=true}; _rt.Start();
     }
-    public static void StopAll(){StopHook();StopKbdHook();_ra=false;}
+    public static void StopAll(){lock(_hookLock){_wantMouse=false;_wantKbd=false;StopHookThread();}_ra=false;}
     static string GetWsUrl(int port){
         try{
             var req=(HttpWebRequest)WebRequest.Create("http://127.0.0.1:"+port+"/json");
@@ -944,6 +987,23 @@ $profileGrid.ItemsSource = $script:dt.DefaultView
 
 # ==================== Functions ====================
 function Set-Status($msg) { $statusBar.Text = $msg }
+function Write-AppLog($msg) {
+    try {
+        $log = Join-Path $script:configDir "ChromeManager.log"
+        Add-Content -LiteralPath $log -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $msg)
+    } catch {}
+}
+
+$window.Dispatcher.add_UnhandledException({
+    param($sender, $e)
+    Write-AppLog ("DispatcherUnhandledException: " + $e.Exception.ToString())
+    $e.Handled = $true
+    try { Set-Status "发生异常，已记录日志: $script:configDir\\ChromeManager.log" } catch {}
+})
+[AppDomain]::CurrentDomain.add_UnhandledException({
+    param($sender, $e)
+    try { Write-AppLog ("UnhandledException: " + $e.ExceptionObject.ToString()) } catch {}
+})
 
 function Refresh-UI {
     $script:dt.Rows.Clear()
