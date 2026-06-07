@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0.6
+
+- Make sync master selection more forgiving on Windows.
+- If no running row is selected, mouse/keyboard sync now automatically uses the first running Chrome profile as master instead of showing a blocking prompt.
+- Right-click "set master" uses the same fallback behavior.
+
 ## 1.0.0.5
 
 - Add a persisted low-memory mode toggle for Windows.

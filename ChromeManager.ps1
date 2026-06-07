@@ -1255,18 +1255,35 @@ $gcJs.Add_KeyDown({ if ($_.Key -eq "Return") { $gcExec.RaiseEvent([System.Window
 $script:syncMaster = $null
 $script:syncActive = $false
 
-$ctxSetMaster.Add_Click({
+function Get-RunningProfiles {
+    return @($script:profiles | Where-Object { Is-Running $_ })
+}
+function Resolve-SyncMaster {
     $sel = Get-SelectedProfiles
-    if ($sel.Count -ne 1) { [System.Windows.MessageBox]::Show("请选中一个运行中的配置作为主控。","提示") | Out-Null; return }
-    if (-not (Is-Running $sel[0])) { [System.Windows.MessageBox]::Show("该配置未运行，请先启动。","提示") | Out-Null; return }
-    $script:syncMaster = $sel[0]
-    [MouseSync]::MasterHwnd = Get-ProfileWindowHandle $sel[0]
+    $selectedRunning = @($sel | Where-Object { Is-Running $_ })
+    if ($selectedRunning.Count -gt 0) { return $selectedRunning[0] }
+    if ($script:syncMaster -and (Is-Running $script:syncMaster)) { return $script:syncMaster }
+    $running = Get-RunningProfiles
+    if ($running.Count -gt 0) { return $running[0] }
+    return $null
+}
+function Set-SyncMaster([PSCustomObject]$p) {
+    if (-not $p -or -not (Is-Running $p)) { return $false }
+    $script:syncMaster = $p
+    [MouseSync]::MasterHwnd = Get-ProfileWindowHandle $p
     if ([MouseSync]::MasterHwnd -eq [IntPtr]::Zero) {
         [System.Windows.MessageBox]::Show("找不到该配置对应的 Chrome 窗口，请先启动或重新排列窗口后再试。","提示") | Out-Null
-        return
+        return $false
     }
-    [MouseSync]::MasterPid = [int]$sel[0].pid
-    Set-Status "主控已设为: $($sel[0].name)  HWND=$([MouseSync]::MasterHwnd)  (点击 [同步鼠标] 开始)"
+    [MouseSync]::MasterPid = [int]$p.pid
+    return $true
+}
+
+$ctxSetMaster.Add_Click({
+    $master = Resolve-SyncMaster
+    if (-not $master) { [System.Windows.MessageBox]::Show("没有运行中的窗口。请先启动至少两个配置。","提示") | Out-Null; return }
+    if (-not (Set-SyncMaster $master)) { return }
+    Set-Status "主控已设为: $($script:syncMaster.name)  HWND=$([MouseSync]::MasterHwnd)  (点击 [同步鼠标] 开始)"
 })
 
 $btnSyncMouse.Add_Click({
@@ -1279,27 +1296,9 @@ $btnSyncMouse.Add_Click({
         Set-Status "同步已停止。"
         return
     }
-    $sel = Get-SelectedProfiles
-    if ($sel.Count -eq 1 -and (Is-Running $sel[0])) {
-        $script:syncMaster = $sel[0]
-    }
-    if (-not $script:syncMaster -or -not (Is-Running $script:syncMaster)) {
-        $running = @($script:profiles | Where-Object { Is-Running $_ })
-        if ($running.Count -eq 0) { [System.Windows.MessageBox]::Show("没有运行中的窗口。","提示") | Out-Null; return }
-        $names = $running | ForEach-Object { $_.name }
-        $picked = [Microsoft.VisualBasic.Interaction]::InputBox(
-            "选择主控窗口（输入名称）:`n`n" + ($names -join "`n"),
-            "设置主控", $names[0])
-        if (-not $picked) { return }
-        $script:syncMaster = $running | Where-Object { $_.name -eq $picked.Trim() } | Select-Object -First 1
-        if (-not $script:syncMaster) { [System.Windows.MessageBox]::Show("未找到该配置。","提示") | Out-Null; return }
-    }
-    [MouseSync]::MasterHwnd = Get-ProfileWindowHandle $script:syncMaster
-    if ([MouseSync]::MasterHwnd -eq [IntPtr]::Zero) {
-        [System.Windows.MessageBox]::Show("找不到主控 Chrome 窗口，请先启动该配置并确认窗口可见。","提示") | Out-Null
-        return
-    }
-    [MouseSync]::MasterPid = [int]$script:syncMaster.pid
+    $master = Resolve-SyncMaster
+    if (-not $master) { [System.Windows.MessageBox]::Show("没有运行中的窗口。请先启动至少两个配置。","提示") | Out-Null; return }
+    if (-not (Set-SyncMaster $master)) { return }
     $slaveProfiles = @($script:profiles | Where-Object { $_.id -ne $script:syncMaster.id -and (Is-Running $_) })
     $slavePorts = [int[]]@($slaveProfiles | ForEach-Object { [int]$_.debugPort })
     $slaveHwnds = [IntPtr[]]@($slaveProfiles | ForEach-Object { Get-ProfileWindowHandle $_ })
