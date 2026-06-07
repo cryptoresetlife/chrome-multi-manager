@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0.5
+
+- Add a persisted low-memory mode toggle for Windows.
+- When enabled, newly launched Chrome profiles disable extensions and several background services, limit renderer processes, and reduce media/disk cache sizes.
+- Show the low-memory mode state in the Windows status bar.
+
 ## 1.0.0-mac.1
 
 - Add a macOS preview package implemented with Python/Tkinter.

@@ -11,6 +11,7 @@ Chrome Multi Manager is a Windows PowerShell/WPF tool for launching and managing
 - Group-control navigation and JavaScript execution through Chrome DevTools Protocol
 - Synchronized mouse and keyboard control across Chrome windows
 - In-page badge showing each Chrome window number and current public exit IP
+- Optional low-memory launch mode for high-volume Chrome profile sessions
 
 ## Download / Run
 
@@ -61,6 +62,8 @@ ChromeManager.ps1
 ```
 
 The executable is built from that PowerShell script with ps2exe.
+
+Windows low-memory mode is available from the left sidebar. It is saved locally and only affects newly started Chrome windows. It disables Chrome extensions and several background services, limits renderer processes, and reduces media/disk cache sizes.
 
 The macOS preview source is:
 

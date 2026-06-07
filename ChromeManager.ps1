@@ -557,6 +557,7 @@ public class ProxyServer {
 $script:configDir   = Join-Path $env:APPDATA "ChromeManager"
 if (-not (Test-Path $script:configDir)) { [void](New-Item -ItemType Directory -Path $script:configDir) }
 $script:configFile  = Join-Path $script:configDir "profiles.json"
+$script:settingsFile = Join-Path $script:configDir "settings.json"
 $script:profileBase = Join-Path $script:configDir "Profiles"
 $_chromePaths = @(
     "C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -569,6 +570,7 @@ $script:profiles    = [System.Collections.ArrayList]::new()
 $script:runtimeCacheAt = [datetime]::MinValue
 $script:runtimeByPort  = @{}
 $script:lastBadgeRefresh = [datetime]::MinValue
+$script:lowMemoryMode = $false
 
 function Load-Config {
     $script:profiles.Clear()
@@ -590,6 +592,34 @@ function Load-Config {
     }
 }
 function Save-Config { ConvertTo-Json -InputObject @($script:profiles.ToArray()) -Depth 3 | Set-Content $script:configFile -Encoding UTF8 }
+function Load-Settings {
+    if (Test-Path $script:settingsFile) {
+        try {
+            $settings = Get-Content $script:settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($null -ne $settings.lowMemoryMode) { $script:lowMemoryMode = [bool]$settings.lowMemoryMode }
+        } catch {}
+    }
+}
+function Save-Settings {
+    @{ lowMemoryMode = [bool]$script:lowMemoryMode } | ConvertTo-Json -Depth 2 | Set-Content $script:settingsFile -Encoding UTF8
+}
+function Get-LowMemoryChromeArgs {
+    return @(
+        "--disable-background-networking",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-default-apps",
+        "--disable-domain-reliability",
+        "--disable-extensions",
+        "--disable-notifications",
+        "--disable-sync",
+        "--disable-features=AutofillServerCommunication,InterestFeedContentSuggestions,MediaRouter,OptimizationHints,Translate",
+        "--disk-cache-size=104857600",
+        "--media-cache-size=16777216",
+        "--process-per-site",
+        "--renderer-process-limit=3"
+    )
+}
 function Update-RuntimeCache {
     if (((Get-Date) - $script:runtimeCacheAt).TotalMilliseconds -lt 800) { return }
     $map = @{}
@@ -665,6 +695,7 @@ function Launch-Profile([PSCustomObject]$p) {
     $dir = "$script:profileBase\$($p.name)"
     if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
     $a = @("--user-data-dir=`"$dir`"", "--remote-debugging-port=$($p.debugPort)", "--no-first-run", "--no-default-browser-check")
+    if ($script:lowMemoryMode) { $a += Get-LowMemoryChromeArgs }
     if ($p.proxy -and $p.proxy.Trim()) {
         if ($p.proxy -match '^https?://([^:@]+):([^@]+)@([^:]+):(\d+)') {
             $lp = 20000 + [int]$p.id
@@ -793,6 +824,8 @@ function Refresh-WindowBadges([int]$minSeconds = 12) {
         if (Is-Running $p) { [void](Update-ProfileBadge $p) }
     }
 }
+
+Load-Settings
 
 # ==================== XAML ====================
 [xml]$MainXaml = @'
@@ -940,6 +973,8 @@ function Refresh-WindowBadges([int]$minSeconds = 12) {
           <Button x:Name="btnImport"   Content="↓  导入代理" Style="{StaticResource OrangeBtn}"/>
           <Button x:Name="btnRefresh"  Content="↺  刷新状态" Style="{StaticResource SBtn}"/>
           <Button x:Name="btnSyncMouse" Content="◎  同步鼠标/键盘" Style="{StaticResource SBtn}"/>
+          <CheckBox x:Name="chkLowMemory" Content="低内存模式" Margin="14,10,10,0"
+                    ToolTip="只对新启动的窗口生效；会禁用扩展和部分 Chrome 后台服务以降低占用。"/>
         </StackPanel>
       </ScrollViewer>
     </Border>
@@ -1046,6 +1081,7 @@ $btnStopAll   = $window.FindName("btnStopAll");   $btnArrange= $window.FindName(
 $btnImport    = $window.FindName("btnImport");    $btnRefresh= $window.FindName("btnRefresh")
 $lblRunning   = $window.FindName("lblRunning");   $lblStopped= $window.FindName("lblStopped")
 $lblTotal     = $window.FindName("lblTotal");     $statusBar = $window.FindName("statusBar")
+$chkLowMemory = $window.FindName("chkLowMemory")
 $gcOnlySel    = $window.FindName("gcOnlySel");    $gcUrl     = $window.FindName("gcUrl")
 $gcGoto       = $window.FindName("gcGoto");       $gcJs      = $window.FindName("gcJs")
 $gcExec       = $window.FindName("gcExec")
@@ -1088,7 +1124,8 @@ function Refresh-UI {
     $total = $script:profiles.Count
     $run   = ($script:profiles | Where-Object { Is-Running $_ }).Count
     $lblRunning.Text = "运行中: $run"; $lblStopped.Text = "已停止: $($total - $run)"; $lblTotal.Text = "共 $total 个"
-    Set-Status "配置: $total   运行中: $run   已停止: $($total - $run)   双击行切换启动/停止"
+    $lm = if ($script:lowMemoryMode) { "开" } else { "关" }
+    Set-Status "配置: $total   运行中: $run   已停止: $($total - $run)   低内存: $lm   双击行切换启动/停止"
 }
 
 function Get-SelectedProfiles {
@@ -1115,6 +1152,18 @@ function Show-EditDlg($title, $p) {
 }
 
 # ==================== Events ====================
+$chkLowMemory.IsChecked = [bool]$script:lowMemoryMode
+$chkLowMemory.Add_Checked({
+    $script:lowMemoryMode = $true
+    Save-Settings
+    Set-Status "低内存模式已开启；新启动或重新启动窗口后生效。"
+})
+$chkLowMemory.Add_Unchecked({
+    $script:lowMemoryMode = $false
+    Save-Settings
+    Set-Status "低内存模式已关闭；新启动或重新启动窗口后生效。"
+})
+
 $btnNew.Add_Click({
     $d = Show-EditDlg "新建配置" $null
     if ($d) {
