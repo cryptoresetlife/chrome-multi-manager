@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0.4
+
+- Add an in-page badge for each Chrome window with the window number and current public exit IP.
+- Re-inject the badge after launch, refresh, timed status checks, and group-control navigation.
+- Build Chrome DevTools Protocol messages with structured JSON to handle injected scripts safely.
+
 ## 1.0.0.3
 
 - Move global mouse and keyboard hooks onto a dedicated background message thread.

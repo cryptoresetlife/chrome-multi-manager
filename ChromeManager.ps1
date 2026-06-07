@@ -568,6 +568,7 @@ if (-not $script:chrome) { [System.Windows.MessageBox]::Show("未找到 Chrome�
 $script:profiles    = [System.Collections.ArrayList]::new()
 $script:runtimeCacheAt = [datetime]::MinValue
 $script:runtimeByPort  = @{}
+$script:lastBadgeRefresh = [datetime]::MinValue
 
 function Load-Config {
     $script:profiles.Clear()
@@ -708,7 +709,8 @@ function CDP-Nav($port, $url) {
     try {
         $t = @(Invoke-RestMethod "http://127.0.0.1:$port/json" -TimeoutSec 2 | Where-Object { $_.type -eq "page" })
         if ($t.Count -eq 0) { return $false }
-        [CDP2]::Send($t[0].webSocketDebuggerUrl, "{`"id`":1,`"method`":`"Page.navigate`",`"params`":{`"url`":`"$url`"}}") | Out-Null
+        $payload = @{ id=1; method="Page.navigate"; params=@{ url=$url } } | ConvertTo-Json -Compress -Depth 5
+        [CDP2]::Send($t[0].webSocketDebuggerUrl, $payload) | Out-Null
         return $true
     } catch { return $false }
 }
@@ -716,10 +718,80 @@ function CDP-Eval($port, $expr) {
     try {
         $t = @(Invoke-RestMethod "http://127.0.0.1:$port/json" -TimeoutSec 2 | Where-Object { $_.type -eq "page" })
         if ($t.Count -eq 0) { return $false }
-        $s = $expr -replace '\\', '\\' -replace '"', '\"' -replace "`r", '' -replace "`n", '\n'
-        [CDP2]::Send($t[0].webSocketDebuggerUrl, "{`"id`":1,`"method`":`"Runtime.evaluate`",`"params`":{`"expression`":`"$s`"}}") | Out-Null
+        $payload = @{ id=1; method="Runtime.evaluate"; params=@{ expression=$expr } } | ConvertTo-Json -Compress -Depth 5
+        [CDP2]::Send($t[0].webSocketDebuggerUrl, $payload) | Out-Null
         return $true
     } catch { return $false }
+}
+function ConvertTo-JsValue($value) {
+    if ($null -eq $value) { return "null" }
+    return ($value | ConvertTo-Json -Compress)
+}
+function Get-ProfileProxyHost([PSCustomObject]$p) {
+    $proxy = ([string]$p.proxy).Trim()
+    if (-not $proxy) { return "" }
+    if ($proxy -match '^[a-zA-Z]+://[^:@/]+:[^@/]+@([^:/]+):(\d+)') { return $Matches[1] }
+    if ($proxy -match '^[a-zA-Z]+://([^:/]+):(\d+)') { return $Matches[1] }
+    if ($proxy -match '^([^:/]+):(\d+)') { return $Matches[1] }
+    return ""
+}
+function Update-ProfileBadge([PSCustomObject]$p) {
+    if (-not (Is-Running $p)) { return $false }
+    $profileId = [int]$p.id
+    $profileName = ConvertTo-JsValue ([string]$p.name)
+    $configuredIp = ConvertTo-JsValue (Get-ProfileProxyHost $p)
+    $js = @"
+(function(){
+  const badgeId = '__chrome_manager_window_badge';
+  const windowNo = $profileId;
+  const profileName = $profileName;
+  const configuredIp = $configuredIp;
+  const title = '窗口 #' + windowNo + (profileName ? '  ' + profileName : '');
+  function ensureBadge(){
+    let el = document.getElementById(badgeId);
+    if (!el) {
+      el = document.createElement('div');
+      el.id = badgeId;
+      const root = document.body || document.documentElement;
+      root.appendChild(el);
+    }
+    el.style.cssText = [
+      'position:fixed',
+      'left:8px',
+      'top:8px',
+      'z-index:2147483647',
+      'padding:5px 8px',
+      'border-radius:6px',
+      'background:rgba(17,24,39,.88)',
+      'color:#fff',
+      'border:1px solid rgba(255,255,255,.22)',
+      'font:12px/1.35 Arial,Microsoft YaHei,sans-serif',
+      'letter-spacing:0',
+      'box-shadow:0 4px 14px rgba(0,0,0,.22)',
+      'pointer-events:none',
+      'white-space:nowrap'
+    ].join(';');
+    return el;
+  }
+  function setBadge(ip, source){
+    const el = ensureBadge();
+    el.textContent = title + '  |  ' + source + ': ' + (ip || '未知');
+  }
+  setBadge(configuredIp || '检测中', configuredIp ? '配置IP' : '出口IP');
+  fetch('https://api.ipify.org?format=json', { cache: 'no-store' })
+    .then(function(r){ return r.json(); })
+    .then(function(data){ if (data && data.ip) setBadge(data.ip, '出口IP'); })
+    .catch(function(){ if (!configuredIp) setBadge('', '出口IP'); });
+})();
+"@
+    return (CDP-Eval $p.debugPort $js)
+}
+function Refresh-WindowBadges([int]$minSeconds = 12) {
+    if ($minSeconds -gt 0 -and ((Get-Date) - $script:lastBadgeRefresh).TotalSeconds -lt $minSeconds) { return }
+    $script:lastBadgeRefresh = Get-Date
+    foreach ($p in $script:profiles) {
+        if (Is-Running $p) { [void](Update-ProfileBadge $p) }
+    }
 }
 
 # ==================== XAML ====================
@@ -1067,12 +1139,14 @@ $btnDelete.Add_Click({
 $btnLaunch.Add_Click({
     $sel = Get-SelectedProfiles; if ($sel.Count -eq 0) { Set-Status "请先选中配置。"; return }
     foreach ($p in $sel) { Launch-Profile $p; Start-Sleep -Milliseconds 600 }
+    Refresh-WindowBadges 0
     Refresh-UI; Set-Status "已启动 $($sel.Count) 个配置。"
 })
 $btnLaunchAll.Add_Click({
     # Stop running profiles first so proxy settings refresh
     foreach ($p in $script:profiles) { if (Is-Running $p) { Stop-Profile $p } }
     $n = 0; foreach ($p in $script:profiles) { Launch-Profile $p; Start-Sleep -Milliseconds 800; $n++ }
+    Refresh-WindowBadges 0
     Refresh-UI; Set-Status "已启动 $n 个配置。"
 })
 $btnStop.Add_Click({
@@ -1100,13 +1174,13 @@ $btnImport.Add_Click({
     }
     Save-Config; Refresh-UI; Set-Status "已导入 $n 个代理配置。"
 })
-$btnRefresh.Add_Click({ Refresh-UI })
+$btnRefresh.Add_Click({ Refresh-UI; Refresh-WindowBadges 0 })
 $profileGrid.Add_MouseDoubleClick({
     $sel = Get-SelectedProfiles
     foreach ($p in $sel) { if (Is-Running $p) { Stop-Profile $p } else { Launch-Profile $p } }
-    Refresh-UI
+    Refresh-UI; Refresh-WindowBadges 0
 })
-$ctxLaunch.Add_Click({ $sel=Get-SelectedProfiles; foreach($p in $sel){Launch-Profile $p;Start-Sleep -Milliseconds 500}; Refresh-UI })
+$ctxLaunch.Add_Click({ $sel=Get-SelectedProfiles; foreach($p in $sel){Launch-Profile $p;Start-Sleep -Milliseconds 500}; Refresh-UI; Refresh-WindowBadges 0 })
 $ctxStop.Add_Click({   $sel=Get-SelectedProfiles; foreach($p in $sel){Stop-Profile $p}; Refresh-UI })
 $ctxEdit.Add_Click({   $btnEdit.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent)) })
 $ctxDelete.Add_Click({ $btnDelete.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent)) })
@@ -1115,6 +1189,8 @@ $gcGoto.Add_Click({
     if (-not $url.StartsWith("http")) { $url = "https://$url" }
     $targets = if ($gcOnlySel.IsChecked) { Get-SelectedProfiles } else { $script:profiles }
     $n = 0; foreach ($p in @($targets)) { if (Is-Running $p -and (CDP-Nav $p.debugPort $url)) { $n++ } }
+    Start-Sleep -Milliseconds 700
+    Refresh-WindowBadges 0
     Set-Status "群控跳转: 已向 $n 个窗口发送 -> $url"
 })
 $gcUrl.Add_KeyDown({ if ($_.Key -eq "Return") { $gcGoto.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent)) } })
@@ -1122,6 +1198,7 @@ $gcExec.Add_Click({
     $js = $gcJs.Text.Trim(); if (-not $js) { Set-Status "请输入脚本。"; return }
     $targets = if ($gcOnlySel.IsChecked) { Get-SelectedProfiles } else { $script:profiles }
     $n = 0; foreach ($p in @($targets)) { if (Is-Running $p -and (CDP-Eval $p.debugPort $js)) { $n++ } }
+    Refresh-WindowBadges 0
     Set-Status "群控执行: 已向 $n 个窗口执行脚本。"
 })
 $gcJs.Add_KeyDown({ if ($_.Key -eq "Return") { $gcExec.RaiseEvent([System.Windows.RoutedEventArgs]::new([System.Windows.Controls.Button]::ClickEvent)) } })
@@ -1211,7 +1288,7 @@ $btnSyncMouse.Add_Click({
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(5)
-$timer.Add_Tick({ Refresh-UI })
+$timer.Add_Tick({ Refresh-UI; Refresh-WindowBadges 15 })
 $timer.Start()
 $window.Add_Closed({ $timer.Stop(); [MouseSync]::StopAll() })
 

@@ -10,8 +10,13 @@ Chrome Multi Manager is a Windows PowerShell/WPF tool for launching and managing
 - Import proxy lists
 - Group-control navigation and JavaScript execution through Chrome DevTools Protocol
 - Synchronized mouse and keyboard control across Chrome windows
+- In-page badge showing each Chrome window number and current public exit IP
 
 ## Download / Run
+
+Download the latest release package:
+
+[Chrome多开管理器_v1.0_发布版.zip](https://github.com/cryptoresetlife/chrome-multi-manager/raw/main/Chrome%E5%A4%9A%E5%BC%80%E7%AE%A1%E7%90%86%E5%99%A8_v1.0_%E5%8F%91%E5%B8%83%E7%89%88.zip)
 
 Use the compiled executable:
 
