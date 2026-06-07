@@ -19,10 +19,6 @@ Windows release package:
 
 [Chrome多开管理器_v1.0_发布版.zip](https://github.com/cryptoresetlife/chrome-multi-manager/raw/main/Chrome%E5%A4%9A%E5%BC%80%E7%AE%A1%E7%90%86%E5%99%A8_v1.0_%E5%8F%91%E5%B8%83%E7%89%88.zip)
 
-macOS preview package:
-
-[Chrome多开管理器_mac_发布版.zip](https://github.com/cryptoresetlife/chrome-multi-manager/raw/main/Chrome%E5%A4%9A%E5%BC%80%E7%AE%A1%E7%90%86%E5%99%A8_mac_%E5%8F%91%E5%B8%83%E7%89%88.zip)
-
 Use the compiled executable:
 
 ```text
@@ -64,14 +60,6 @@ ChromeManager.ps1
 The executable is built from that PowerShell script with ps2exe.
 
 Windows low-memory mode is available from the left sidebar. It is saved locally and only affects newly started Chrome windows. It disables Chrome extensions and several background services, limits renderer processes, and reduces media/disk cache sizes.
-
-The macOS preview source is:
-
-```text
-mac/ChromeMultiManagerMac.py
-```
-
-The macOS preview supports independent Chrome profiles, proxy import, batch launch/close, group navigation/JS, window arrangement, and the window number/IP badge. Whole-window mouse and keyboard synchronization is Windows-only in this release.
 
 ## License
 
