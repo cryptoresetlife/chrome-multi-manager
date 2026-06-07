@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0.7
+
+- Add basic per-profile fingerprint configuration on Windows.
+- Support user agent, language, timezone, window size, platform, and WebRTC leak-protection settings.
+- Apply fingerprint settings during Chrome launch and before group-control navigation.
+
 ## 1.0.0.6
 
 - Make sync master selection more forgiving on Windows.

@@ -572,6 +572,41 @@ $script:runtimeByPort  = @{}
 $script:lastBadgeRefresh = [datetime]::MinValue
 $script:lowMemoryMode = $false
 
+function Get-DefaultFingerprint([int]$id = 1) {
+    return [PSCustomObject]@{
+        enabled = $false
+        userAgent = ""
+        language = "zh-CN"
+        timezone = "Asia/Shanghai"
+        width = 1280 + (([int]$id % 4) * 80)
+        height = 800 + (([int]$id % 3) * 60)
+        platform = "Win32"
+        webRtcProtect = $true
+    }
+}
+function Get-ValueOrDefault($value, $default) {
+    if ($null -eq $value) { return $default }
+    $s = [string]$value
+    if (-not $s.Trim()) { return $default }
+    return $s
+}
+function Get-IntOrDefault($value, [int]$default) {
+    $n = 0
+    if ($null -ne $value -and [int]::TryParse(([string]$value).Trim(), [ref]$n) -and $n -gt 0) { return $n }
+    return $default
+}
+function Is-FingerprintEnabled([PSCustomObject]$p) {
+    return ($null -ne $p.fpEnabled -and [bool]$p.fpEnabled)
+}
+function Get-FingerprintSummary([PSCustomObject]$p) {
+    if (-not (Is-FingerprintEnabled $p)) { return "关" }
+    $lang = Get-ValueOrDefault $p.fpLang "zh-CN"
+    $tz = Get-ValueOrDefault $p.fpTimezone "Asia/Shanghai"
+    $w = Get-IntOrDefault $p.fpWidth 1280
+    $h = Get-IntOrDefault $p.fpHeight 800
+    return "$lang / $tz / ${w}x$h"
+}
+
 function Load-Config {
     $script:profiles.Clear()
     if (Test-Path $script:configFile) {
@@ -579,11 +614,21 @@ function Load-Config {
             $data = Get-Content $script:configFile -Raw -Encoding UTF8 | ConvertFrom-Json
             $items = if ($data -is [System.Array]) { $data } else { @($data) }
             foreach ($item in $items) {
+                $id = [int]$item.id
+                $fp = Get-DefaultFingerprint $id
                 [void]$script:profiles.Add([PSCustomObject]@{
-                    id=([int]$item.id); name=([string]$item.name); group=([string]$item.group)
+                    id=$id; name=([string]$item.name); group=([string]$item.group)
                     proxy=([string]$item.proxy); note=([string]$item.note)
                     pid=if($item.pid){[int]$item.pid}else{$null}
-                    debugPort=if($item.debugPort){[int]$item.debugPort}else{19000+[int]$item.id}
+                    debugPort=if($item.debugPort){[int]$item.debugPort}else{19000+$id}
+                    fpEnabled=if($null -ne $item.fpEnabled){[bool]$item.fpEnabled}else{[bool]$fp.enabled}
+                    fpUA=Get-ValueOrDefault $item.fpUA $fp.userAgent
+                    fpLang=Get-ValueOrDefault $item.fpLang $fp.language
+                    fpTimezone=Get-ValueOrDefault $item.fpTimezone $fp.timezone
+                    fpWidth=Get-IntOrDefault $item.fpWidth $fp.width
+                    fpHeight=Get-IntOrDefault $item.fpHeight $fp.height
+                    fpPlatform=Get-ValueOrDefault $item.fpPlatform $fp.platform
+                    fpWebRtc=if($null -ne $item.fpWebRtc){[bool]$item.fpWebRtc}else{[bool]$fp.webRtcProtect}
                 })
             }
         } catch {
@@ -696,6 +741,16 @@ function Launch-Profile([PSCustomObject]$p) {
     if (-not (Test-Path $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
     $a = @("--user-data-dir=`"$dir`"", "--remote-debugging-port=$($p.debugPort)", "--no-first-run", "--no-default-browser-check")
     if ($script:lowMemoryMode) { $a += Get-LowMemoryChromeArgs }
+    if (Is-FingerprintEnabled $p) {
+        $lang = Get-ValueOrDefault $p.fpLang "zh-CN"
+        $ua = ([string]$p.fpUA).Trim()
+        $w = Get-IntOrDefault $p.fpWidth 1280
+        $h = Get-IntOrDefault $p.fpHeight 800
+        if ($lang) { $a += "--lang=$lang" }
+        if ($ua) { $a += "--user-agent=`"$($ua -replace '"','')`"" }
+        if ($w -gt 0 -and $h -gt 0) { $a += "--window-size=$w,$h" }
+        if ($p.fpWebRtc) { $a += "--force-webrtc-ip-handling-policy=disable_non_proxied_udp" }
+    }
     if ($p.proxy -and $p.proxy.Trim()) {
         if ($p.proxy -match '^https?://([^:@]+):([^@]+)@([^:]+):(\d+)') {
             $lp = 20000 + [int]$p.id
@@ -714,6 +769,7 @@ function Launch-Profile([PSCustomObject]$p) {
         $realProc = Get-ProfileChromeProcess $p
         if ($realProc) { $p.pid = [int]$realProc.Id; break }
     }
+    [void](Apply-ProfileFingerprint $p)
     Save-Config
 }
 function Stop-Profile([PSCustomObject]$p) {
@@ -754,9 +810,60 @@ function CDP-Eval($port, $expr) {
         return $true
     } catch { return $false }
 }
+function CDP-Command($port, [string]$method, $params) {
+    try {
+        $t = @(Invoke-RestMethod "http://127.0.0.1:$port/json" -TimeoutSec 2 | Where-Object { $_.type -eq "page" })
+        if ($t.Count -eq 0) { return $false }
+        if ($null -eq $params) { $params = @{} }
+        $payload = @{ id=1; method=$method; params=$params } | ConvertTo-Json -Compress -Depth 8
+        [CDP2]::Send($t[0].webSocketDebuggerUrl, $payload) | Out-Null
+        return $true
+    } catch { return $false }
+}
 function ConvertTo-JsValue($value) {
     if ($null -eq $value) { return "null" }
     return ($value | ConvertTo-Json -Compress)
+}
+function ConvertTo-CdpLocale([string]$lang) {
+    if (-not $lang) { return "zh-CN" }
+    return (($lang -split ",")[0]).Trim()
+}
+function Apply-ProfileFingerprint([PSCustomObject]$p) {
+    if (-not (Is-Running $p) -or -not (Is-FingerprintEnabled $p)) { return $false }
+    $lang = Get-ValueOrDefault $p.fpLang "zh-CN"
+    $locale = ConvertTo-CdpLocale $lang
+    $tz = Get-ValueOrDefault $p.fpTimezone "Asia/Shanghai"
+    $ua = ([string]$p.fpUA).Trim()
+    $platform = Get-ValueOrDefault $p.fpPlatform "Win32"
+    $w = Get-IntOrDefault $p.fpWidth 1280
+    $h = Get-IntOrDefault $p.fpHeight 800
+
+    [void](CDP-Command $p.debugPort "Network.enable" @{})
+    if ($ua) {
+        [void](CDP-Command $p.debugPort "Network.setUserAgentOverride" @{ userAgent=$ua; acceptLanguage=$lang; platform=$platform })
+    }
+    if ($tz) { [void](CDP-Command $p.debugPort "Emulation.setTimezoneOverride" @{ timezoneId=$tz }) }
+    if ($locale) { [void](CDP-Command $p.debugPort "Emulation.setLocaleOverride" @{ locale=$locale }) }
+
+    $langValue = ConvertTo-JsValue $locale
+    $langItems = @($lang -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($langItems.Count -eq 0) { $langItems = @($locale) }
+    $languages = ConvertTo-Json -InputObject $langItems -Compress
+    $platformValue = ConvertTo-JsValue $platform
+    $script = @"
+(function(){
+  const fpLanguage = $langValue;
+  const fpLanguages = $languages;
+  const fpPlatform = $platformValue;
+  try { Object.defineProperty(navigator, 'language', { get: function(){ return fpLanguage; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'languages', { get: function(){ return fpLanguages; }, configurable: true }); } catch(e) {}
+  try { Object.defineProperty(navigator, 'platform', { get: function(){ return fpPlatform; }, configurable: true }); } catch(e) {}
+})();
+"@
+    [void](CDP-Command $p.debugPort "Page.addScriptToEvaluateOnNewDocument" @{ source=$script })
+    [void](CDP-Eval $p.debugPort $script)
+    if ($w -gt 0 -and $h -gt 0) { try { [void][WinAPI2]::ShowWindow((Get-ProfileWindowHandle $p), 9) } catch {} }
+    return $true
 }
 function Get-ProfileProxyHost([PSCustomObject]$p) {
     $proxy = ([string]$p.proxy).Trim()
@@ -998,6 +1105,7 @@ Load-Settings
           <DataGridTextColumn Header="名称" Binding="{Binding [name]}"   Width="130" MinWidth="80"/>
           <DataGridTextColumn Header="分组" Binding="{Binding [group]}"  Width="80"  MinWidth="60"/>
           <DataGridTextColumn Header="代理" Binding="{Binding [proxy]}"  Width="*"   MinWidth="200"/>
+          <DataGridTextColumn Header="指纹" Binding="{Binding [fingerprint]}" Width="190" MinWidth="120"/>
           <DataGridTextColumn Header="状态" Binding="{Binding [status]}" Width="80"  MinWidth="70"/>
           <DataGridTextColumn Header="备注" Binding="{Binding [note]}"   Width="110" MinWidth="60"/>
         </DataGrid.Columns>
@@ -1041,7 +1149,7 @@ Load-Settings
 [xml]$DlgXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Height="310" Width="500" ResizeMode="NoResize"
+        Height="660" Width="620" ResizeMode="NoResize"
         Background="#0f0f17" Foreground="#c0c0d8"
         FontFamily="Microsoft YaHei UI" FontSize="13"
         WindowStartupLocation="CenterOwner">
@@ -1049,9 +1157,14 @@ Load-Settings
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
       <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-      <RowDefinition Height="14"/>  <RowDefinition Height="Auto"/>
+      <RowDefinition Height="12"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
+      <RowDefinition Height="12"/><RowDefinition Height="Auto"/>
     </Grid.RowDefinitions>
-    <Grid.ColumnDefinitions><ColumnDefinition Width="55"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="82"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
     <TextBlock Grid.Row="0" Grid.Column="0" Text="名称" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
     <TextBlock Grid.Row="1" Grid.Column="0" Text="分组" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
     <TextBlock Grid.Row="2" Grid.Column="0" Text="代理" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
@@ -1060,8 +1173,26 @@ Load-Settings
     <TextBox x:Name="tbGroup" Grid.Row="1" Grid.Column="1" Margin="0,0,0,10" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
     <TextBox x:Name="tbProxy" Grid.Row="2" Grid.Column="1" Margin="0,0,0,10" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
     <TextBox x:Name="tbNote"  Grid.Row="3" Grid.Column="1"                   Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
-    <TextBlock Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="2" Text="代理格式:  http://用户名:密码@IP:端口" FontSize="11" Foreground="#3a3a58" VerticalAlignment="Center"/>
-    <StackPanel Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
+    <TextBlock Grid.Row="5" Grid.Column="0" Grid.ColumnSpan="2" Text="基础指纹" Foreground="#82b4ff" FontWeight="Bold" FontSize="12" Margin="0,4,0,8"/>
+    <CheckBox x:Name="cbFpEnabled" Grid.Row="6" Grid.Column="1" Content="启用基础指纹配置" Margin="0,0,0,10"/>
+    <TextBlock Grid.Row="7" Grid.Column="0" Text="UA" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
+    <TextBox x:Name="tbUA" Grid.Row="7" Grid.Column="1" Margin="0,0,0,10" Height="54" TextWrapping="Wrap" AcceptsReturn="True" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+    <TextBlock Grid.Row="8" Grid.Column="0" Text="语言" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
+    <TextBox x:Name="tbLang" Grid.Row="8" Grid.Column="1" Margin="0,0,0,10" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+    <TextBlock Grid.Row="9" Grid.Column="0" Text="时区" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
+    <TextBox x:Name="tbTimezone" Grid.Row="9" Grid.Column="1" Margin="0,0,0,10" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+    <TextBlock Grid.Row="10" Grid.Column="0" Text="窗口尺寸" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
+    <StackPanel Grid.Row="10" Grid.Column="1" Orientation="Horizontal" Margin="0,0,0,10">
+      <TextBox x:Name="tbFpWidth" Width="90" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+      <TextBlock Text=" x " Foreground="#5a5a7a" VerticalAlignment="Center" Margin="8,0"/>
+      <TextBox x:Name="tbFpHeight" Width="90" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+      <TextBlock Text="  例: 1365 x 860" Foreground="#3a3a58" VerticalAlignment="Center" Margin="12,0,0,0" FontSize="11"/>
+    </StackPanel>
+    <TextBlock Grid.Row="11" Grid.Column="0" Text="Platform" Foreground="#5a5a7a" VerticalAlignment="Center" Margin="0,0,0,10"/>
+    <TextBox x:Name="tbPlatform" Grid.Row="11" Grid.Column="1" Margin="0,0,0,10" Height="32" Background="#1a1a2a" Foreground="#c0c0d8" BorderBrush="#2a2a45" BorderThickness="1" Padding="10,6" CaretBrush="#82b4ff"/>
+    <CheckBox x:Name="cbWebRtc" Grid.Row="12" Grid.Column="1" Content="WebRTC 防泄露 (disable_non_proxied_udp)" Margin="0,0,0,2"/>
+    <TextBlock Grid.Row="13" Grid.Column="0" Grid.ColumnSpan="2" Text="代理格式: http://用户名:密码@IP:端口。基础指纹只做 UA/语言/时区/尺寸/WebRTC，不包含高级 Canvas/WebGL 伪装。" FontSize="11" Foreground="#3a3a58" VerticalAlignment="Center"/>
+    <StackPanel Grid.Row="15" Grid.Column="0" Grid.ColumnSpan="2" Orientation="Horizontal" HorizontalAlignment="Right">
       <Button x:Name="btnOk"  Content="确  定" Width="90" Height="34" Margin="0,0,10,0" Background="#1a3560" Foreground="#82b4ff" BorderThickness="0" Cursor="Hand"/>
       <Button x:Name="btnCan" Content="取  消" Width="90" Height="34"                   Background="#252535" Foreground="#7070a0" BorderThickness="0" Cursor="Hand"/>
     </StackPanel>
@@ -1090,7 +1221,7 @@ $ctxEdit      = $window.FindName("ctxEdit");      $ctxDelete    = $window.FindNa
 $ctxSetMaster = $window.FindName("ctxSetMaster"); $btnSyncMouse = $window.FindName("btnSyncMouse")
 
 $script:dt = New-Object System.Data.DataTable
-@("id","name","group","proxy","status","note") | ForEach-Object { [void]$script:dt.Columns.Add($_) }
+@("id","name","group","proxy","fingerprint","status","note") | ForEach-Object { [void]$script:dt.Columns.Add($_) }
 $profileGrid.ItemsSource = $script:dt.DefaultView
 
 # ==================== Functions ====================
@@ -1118,7 +1249,8 @@ function Refresh-UI {
     foreach ($p in $script:profiles) {
         $r = $script:dt.NewRow()
         $r["id"] = "$($p.id)"; $r["name"] = $p.name; $r["group"] = $p.group
-        $r["proxy"] = $p.proxy; $r["status"] = if (Is-Running $p) { "运行中" } else { "已停止" }; $r["note"] = $p.note
+        $r["proxy"] = $p.proxy; $r["fingerprint"] = Get-FingerprintSummary $p
+        $r["status"] = if (Is-Running $p) { "运行中" } else { "已停止" }; $r["note"] = $p.note
         [void]$script:dt.Rows.Add($r)
     }
     $total = $script:profiles.Count
@@ -1140,13 +1272,48 @@ function Show-EditDlg($title, $p) {
     $dlg.Owner = $window; $dlg.Title = $title
     $tn = $dlg.FindName("tbName"); $tg = $dlg.FindName("tbGroup")
     $tp = $dlg.FindName("tbProxy"); $tno = $dlg.FindName("tbNote")
+    $fpEnabled = $dlg.FindName("cbFpEnabled"); $fpUA = $dlg.FindName("tbUA")
+    $fpLang = $dlg.FindName("tbLang"); $fpTimezone = $dlg.FindName("tbTimezone")
+    $fpWidth = $dlg.FindName("tbFpWidth"); $fpHeight = $dlg.FindName("tbFpHeight")
+    $fpPlatform = $dlg.FindName("tbPlatform"); $fpWebRtc = $dlg.FindName("cbWebRtc")
     $ok = $dlg.FindName("btnOk"); $can = $dlg.FindName("btnCan")
-    if ($p) { $tn.Text = $p.name; $tg.Text = $p.group; $tp.Text = $p.proxy; $tno.Text = $p.note }
-    else    { $tg.Text = "默认" }
+    $defaults = Get-DefaultFingerprint $(if ($p) { [int]$p.id } else { Get-NextId })
+    if ($p) {
+        $tn.Text = $p.name; $tg.Text = $p.group; $tp.Text = $p.proxy; $tno.Text = $p.note
+        $fpEnabled.IsChecked = [bool](Is-FingerprintEnabled $p)
+        $fpUA.Text = Get-ValueOrDefault $p.fpUA $defaults.userAgent
+        $fpLang.Text = Get-ValueOrDefault $p.fpLang $defaults.language
+        $fpTimezone.Text = Get-ValueOrDefault $p.fpTimezone $defaults.timezone
+        $fpWidth.Text = [string](Get-IntOrDefault $p.fpWidth $defaults.width)
+        $fpHeight.Text = [string](Get-IntOrDefault $p.fpHeight $defaults.height)
+        $fpPlatform.Text = Get-ValueOrDefault $p.fpPlatform $defaults.platform
+        $fpWebRtc.IsChecked = if ($null -ne $p.fpWebRtc) { [bool]$p.fpWebRtc } else { [bool]$defaults.webRtcProtect }
+    }
+    else {
+        $tg.Text = "默认"
+        $fpEnabled.IsChecked = [bool]$defaults.enabled
+        $fpUA.Text = $defaults.userAgent
+        $fpLang.Text = $defaults.language
+        $fpTimezone.Text = $defaults.timezone
+        $fpWidth.Text = [string]$defaults.width
+        $fpHeight.Text = [string]$defaults.height
+        $fpPlatform.Text = $defaults.platform
+        $fpWebRtc.IsChecked = [bool]$defaults.webRtcProtect
+    }
     $ok.Add_Click({ $dlg.DialogResult = $true })
     $can.Add_Click({ $dlg.DialogResult = $false; $dlg.Close() })
     if ($dlg.ShowDialog() -and $tn.Text.Trim()) {
-        return @{ name = $tn.Text.Trim(); group = $tg.Text.Trim(); proxy = $tp.Text.Trim(); note = $tno.Text.Trim() }
+        return @{
+            name = $tn.Text.Trim(); group = $tg.Text.Trim(); proxy = $tp.Text.Trim(); note = $tno.Text.Trim()
+            fpEnabled = [bool]$fpEnabled.IsChecked
+            fpUA = $fpUA.Text.Trim()
+            fpLang = Get-ValueOrDefault $fpLang.Text $defaults.language
+            fpTimezone = Get-ValueOrDefault $fpTimezone.Text $defaults.timezone
+            fpWidth = Get-IntOrDefault $fpWidth.Text $defaults.width
+            fpHeight = Get-IntOrDefault $fpHeight.Text $defaults.height
+            fpPlatform = Get-ValueOrDefault $fpPlatform.Text $defaults.platform
+            fpWebRtc = [bool]$fpWebRtc.IsChecked
+        }
     }
     return $null
 }
@@ -1168,7 +1335,11 @@ $btnNew.Add_Click({
     $d = Show-EditDlg "新建配置" $null
     if ($d) {
         $nid = Get-NextId
-        [void]$script:profiles.Add([PSCustomObject]@{ id=$nid; name=$d.name; group=$d.group; proxy=$d.proxy; pid=$null; debugPort=(19000+$nid); note=$d.note })
+        [void]$script:profiles.Add([PSCustomObject]@{
+            id=$nid; name=$d.name; group=$d.group; proxy=$d.proxy; pid=$null; debugPort=(19000+$nid); note=$d.note
+            fpEnabled=[bool]$d.fpEnabled; fpUA=$d.fpUA; fpLang=$d.fpLang; fpTimezone=$d.fpTimezone
+            fpWidth=[int]$d.fpWidth; fpHeight=[int]$d.fpHeight; fpPlatform=$d.fpPlatform; fpWebRtc=[bool]$d.fpWebRtc
+        })
         Save-Config; Refresh-UI; Set-Status "已创建: $($d.name)"
     }
 })
@@ -1176,7 +1347,13 @@ $btnEdit.Add_Click({
     $sel = Get-SelectedProfiles
     if ($sel.Count -ne 1) { [System.Windows.MessageBox]::Show("请选中一个配置进行编辑。", "提示") | Out-Null; return }
     $d = Show-EditDlg "编辑配置" $sel[0]
-    if ($d) { $sel[0].name=$d.name; $sel[0].group=$d.group; $sel[0].proxy=$d.proxy; $sel[0].note=$d.note; Save-Config; Refresh-UI }
+    if ($d) {
+        $sel[0].name=$d.name; $sel[0].group=$d.group; $sel[0].proxy=$d.proxy; $sel[0].note=$d.note
+        $sel[0].fpEnabled=[bool]$d.fpEnabled; $sel[0].fpUA=$d.fpUA; $sel[0].fpLang=$d.fpLang; $sel[0].fpTimezone=$d.fpTimezone
+        $sel[0].fpWidth=[int]$d.fpWidth; $sel[0].fpHeight=[int]$d.fpHeight; $sel[0].fpPlatform=$d.fpPlatform; $sel[0].fpWebRtc=[bool]$d.fpWebRtc
+        if (Is-Running $sel[0]) { [void](Apply-ProfileFingerprint $sel[0]) }
+        Save-Config; Refresh-UI
+    }
 })
 $btnDelete.Add_Click({
     $sel = Get-SelectedProfiles; if ($sel.Count -eq 0) { return }
@@ -1214,10 +1391,13 @@ $btnImport.Add_Click({
         $pt = $line.Trim() -split ":"
         if ($pt.Count -ge 4) {
             $nid = Get-NextId
+            $fp = Get-DefaultFingerprint $nid
             [void]$script:profiles.Add([PSCustomObject]@{
                 id=$nid; name="账号$nid"; group="默认"
                 proxy="http://$($pt[2]):$($pt[3..($pt.Count-1)] -join ':')@$($pt[0]):$($pt[1])"
                 pid=$null; debugPort=(19000+$nid); note=""
+                fpEnabled=[bool]$fp.enabled; fpUA=$fp.userAgent; fpLang=$fp.language; fpTimezone=$fp.timezone
+                fpWidth=[int]$fp.width; fpHeight=[int]$fp.height; fpPlatform=$fp.platform; fpWebRtc=[bool]$fp.webRtcProtect
             }); $n++
         }
     }
@@ -1237,7 +1417,12 @@ $gcGoto.Add_Click({
     $url = $gcUrl.Text.Trim(); if (-not $url) { Set-Status "请输入地址。"; return }
     if (-not $url.StartsWith("http")) { $url = "https://$url" }
     $targets = if ($gcOnlySel.IsChecked) { Get-SelectedProfiles } else { $script:profiles }
-    $n = 0; foreach ($p in @($targets)) { if (Is-Running $p -and (CDP-Nav $p.debugPort $url)) { $n++ } }
+    $n = 0; foreach ($p in @($targets)) {
+        if (Is-Running $p) {
+            [void](Apply-ProfileFingerprint $p)
+            if (CDP-Nav $p.debugPort $url) { $n++ }
+        }
+    }
     Start-Sleep -Milliseconds 700
     Refresh-WindowBadges 0
     Set-Status "群控跳转: 已向 $n 个窗口发送 -> $url"

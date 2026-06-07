@@ -12,6 +12,7 @@ Chrome Multi Manager is a Windows PowerShell/WPF tool for launching and managing
 - Synchronized mouse and keyboard control across Chrome windows
 - In-page badge showing each Chrome window number and current public exit IP
 - Optional low-memory launch mode for high-volume Chrome profile sessions
+- Basic per-profile fingerprint configuration for user agent, language, timezone, window size, platform, and WebRTC leak protection
 
 ## Download / Run
 
@@ -60,6 +61,8 @@ ChromeManager.ps1
 The executable is built from that PowerShell script with ps2exe.
 
 Windows low-memory mode is available from the left sidebar. It is saved locally and only affects newly started Chrome windows. It disables Chrome extensions and several background services, limits renderer processes, and reduces media/disk cache sizes.
+
+Basic fingerprint settings are available in each profile edit dialog. They are saved per profile and are applied through Chrome launch flags plus Chrome DevTools Protocol for future page loads.
 
 ## License
 
