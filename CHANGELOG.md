@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.0.0.9
+
+- Close all managed Chrome profile windows when the manager app exits.
+- Strengthen profile shutdown by matching Chrome processes through each profile's remote debugging port.
+
 ## 1.0.0.8
 
 - Fix mouse and keyboard sync master detection for multi-window control.

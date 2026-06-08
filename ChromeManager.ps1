@@ -837,11 +837,32 @@ function Launch-Profile([PSCustomObject]$p) {
     Save-Config
 }
 function Stop-Profile([PSCustomObject]$p) {
+    $ids = New-Object System.Collections.Generic.HashSet[int]
+    $port = [int]$p.debugPort
+    try {
+        $items = Get-CimInstance Win32_Process -Filter "Name='chrome.exe'" -ErrorAction SilentlyContinue
+        foreach ($ci in @($items)) {
+            $cmd = [string]$ci.CommandLine
+            if ($cmd -match "--remote-debugging-port=$port(\D|$)") { [void]$ids.Add([int]$ci.ProcessId) }
+        }
+    } catch {}
     $proc = Get-ProfileChromeProcess $p
-    if ($proc) { Stop-Process -Id ([int]$proc.Id) -Force -ErrorAction SilentlyContinue }
-    elseif ($p.pid -and [int]$p.pid -gt 0) { Stop-Process -Id ([int]$p.pid) -Force -ErrorAction SilentlyContinue }
+    if ($proc) { [void]$ids.Add([int]$proc.Id) }
+    elseif ($p.pid -and [int]$p.pid -gt 0) { [void]$ids.Add([int]$p.pid) }
+    foreach ($id in @($ids)) { Stop-Process -Id $id -Force -ErrorAction SilentlyContinue }
     $p.pid = $null; Save-Config
     $script:runtimeCacheAt = [datetime]::MinValue
+}
+function Stop-AllManagedProfiles {
+    $n = 0
+    foreach ($p in @($script:profiles)) {
+        if (Is-Running $p) {
+            Stop-Profile $p
+            $n++
+        }
+    }
+    if ($n -gt 0) { Write-AppLog ("Closed managed Chrome windows on app exit: {0}" -f $n) }
+    return $n
 }
 function Arrange-All {
     Add-Type -AssemblyName System.Windows.Forms
@@ -1002,7 +1023,7 @@ Load-Settings
 [xml]$MainXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Chrome 多开管理器 v1.0.8"
+        Title="Chrome 多开管理器 v1.0.9"
         Height="740" Width="1120" MinHeight="580" MinWidth="900"
         Background="#0f0f17" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" FontSize="13">
@@ -1105,7 +1126,7 @@ Load-Settings
         <Ellipse Width="10" Height="10" Fill="#82b4ff" Margin="0,0,10,0"/>
         <TextBlock Text="Chrome" FontSize="19" FontWeight="Bold" Foreground="#82b4ff" VerticalAlignment="Center"/>
         <TextBlock Text=" 多开管理器" FontSize="19" Foreground="#c0c0d8" VerticalAlignment="Center"/>
-        <TextBlock Text="  v1.0.8" FontSize="10" Foreground="#3a3a58" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
+        <TextBlock Text="  v1.0.9" FontSize="10" Foreground="#3a3a58" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
         <Border Background="#183d22" CornerRadius="5" Padding="12,5" Margin="0,0,8,0">
@@ -1608,7 +1629,11 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds(5)
 $timer.Add_Tick({ Refresh-UI; Refresh-WindowBadges 15 })
 $timer.Start()
-$window.Add_Closed({ $timer.Stop(); [MouseSync]::StopAll() })
+$window.Add_Closing({
+    try { $timer.Stop() } catch {}
+    try { [MouseSync]::StopAll() } catch {}
+    try { [void](Stop-AllManagedProfiles) } catch { Write-AppLog ("Exit cleanup failed: " + $_.Exception.ToString()) }
+})
 
 Load-Config; Refresh-UI
 $window.ShowDialog() | Out-Null
