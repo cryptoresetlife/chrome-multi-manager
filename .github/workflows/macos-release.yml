@@ -1,0 +1,65 @@
+name: Build macOS Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/macos-release.yml"
+      - "mac/macos_source_bundle.tar.gz.b64"
+      - "mac/macos_source_bundle.tar.gz.b64.part.*"
+      - "Package.swift"
+      - "Sources/ChromeMultiManagerMac/**"
+      - "script/package_macos_release.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: macos-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: ${{ github.event_name == 'workflow_dispatch' || !contains(github.event.head_commit.message, '[skip macos package]') }}
+    runs-on: macos-15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Expand source bundle
+        run: |
+          if ls mac/macos_source_bundle.tar.gz.b64.part.* >/dev/null 2>&1; then
+            cat mac/macos_source_bundle.tar.gz.b64.part.* > /tmp/chrome-multi-manager-mac-source.tar.gz.b64
+            base64 --decode < /tmp/chrome-multi-manager-mac-source.tar.gz.b64 > /tmp/chrome-multi-manager-mac-source.tar.gz
+            tar -xzf /tmp/chrome-multi-manager-mac-source.tar.gz
+            rm -f mac/macos_source_bundle.tar.gz.b64.part.*
+          elif [[ -f "mac/macos_source_bundle.tar.gz.b64" ]]; then
+            base64 --decode < "mac/macos_source_bundle.tar.gz.b64" > /tmp/chrome-multi-manager-mac-source.tar.gz
+            tar -xzf /tmp/chrome-multi-manager-mac-source.tar.gz
+            rm -f "mac/macos_source_bundle.tar.gz.b64"
+          fi
+
+      - name: Build package
+        run: ./script/package_macos_release.sh
+
+      - name: Verify package
+        run: |
+          test -f "Chrome多开管理器_mac_发布版.zip"
+          mkdir -p /tmp/chrome-multi-manager-mac
+          ditto -x -k "Chrome多开管理器_mac_发布版.zip" /tmp/chrome-multi-manager-mac
+          codesign --verify --deep --strict --verbose=2 "/tmp/chrome-multi-manager-mac/Chrome 多开管理器.app"
+
+      - name: Commit package
+        run: |
+          if [[ -z "$(git status --porcelain -- "Chrome多开管理器_mac_发布版.zip")" ]]; then
+            echo "No package changes."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .github .gitignore Package.swift README.md Sources mac script "Chrome多开管理器_mac_发布版.zip"
+          git commit -m "Add native macOS app package [skip macos package]"
+          git push
