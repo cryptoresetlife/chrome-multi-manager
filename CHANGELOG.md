@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.0.8
+
+- Fix mouse and keyboard sync master detection for multi-window control.
+- While sync is enabled, the currently operated managed Chrome window becomes the master automatically.
+- Register all visible running Chrome windows with the sync relay and skip the active master dynamically.
+
 ## 1.0.0.7
 
 - Add basic per-profile fingerprint configuration on Windows.

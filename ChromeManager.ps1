@@ -49,6 +49,8 @@ public class MouseSync {
     [DllImport("user32.dll")] static extern bool PeekMessage(out MSG msg,IntPtr h,uint min,uint max,uint remove);
     [DllImport("user32.dll")] static extern bool PostThreadMessage(uint id,uint msg,IntPtr w,IntPtr l);
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern IntPtr WindowFromPoint(POINT p);
+    [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr h,uint flags);
     [DllImport("user32.dll")] static extern short GetKeyState(int vk);
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
     [DllImport("user32.dll")] static extern bool EnumWindows(EnumWinProc fn,IntPtr l);
@@ -66,6 +68,7 @@ public class MouseSync {
     static IntPtr _mhook,_khook; static HookProc _mproc,_kproc;
     public static IntPtr MasterHwnd=IntPtr.Zero;
     public static int MasterPid=0;
+    public static int MasterPort=0;
     public static int TopOffset=88;
     public static int LastMouseHookError=0,LastKeyboardHookError=0;
     public struct Evt{public int Type,Px,Py,WinPx,WinPy,Btn,Delta,Modifiers,InPage;}
@@ -82,6 +85,11 @@ public class MouseSync {
             return true;
         },IntPtr.Zero);
         return found;
+    }
+    public static IntPtr GetForegroundHwnd(){return GetForegroundWindow();}
+    public static int GetForegroundPid(){
+        uint pid; GetWindowThreadProcessId(GetForegroundWindow(),out pid);
+        return (int)pid;
     }
 
     public static int CalcTopOffset(string wsUrl,IntPtr hwnd){
@@ -168,9 +176,61 @@ public class MouseSync {
             if(_khook!=IntPtr.Zero){UnhookWindowsHookEx(_khook);_khook=IntPtr.Zero;}
         }
     }
+    static bool HasManagedWindows(){
+        return _slaveWindows!=null&&_slaveWindows.Length>0;
+    }
+    static bool WindowContainsPoint(IntPtr hwnd,POINT pt){
+        RECT r;
+        return hwnd!=IntPtr.Zero&&IsWindow(hwnd)&&GetWindowRect(hwnd,out r)&&pt.x>=r.L&&pt.x<=r.R&&pt.y>=r.T&&pt.y<=r.B;
+    }
+    static int ManagedIndexByHwnd(IntPtr hwnd){
+        if(hwnd==IntPtr.Zero||_slaveWindows==null)return -1;
+        for(int i=0;i<_slaveWindows.Length;i++){
+            if(_slaveWindows[i]==hwnd&&IsWindow(hwnd))return i;
+        }
+        uint pid;
+        GetWindowThreadProcessId(hwnd,out pid);
+        if(pid==0)return -1;
+        for(int i=0;i<_slaveWindows.Length;i++){
+            if(_slaveWindows[i]==IntPtr.Zero||!IsWindow(_slaveWindows[i]))continue;
+            uint wp; GetWindowThreadProcessId(_slaveWindows[i],out wp);
+            if(wp==pid)return i;
+        }
+        return -1;
+    }
+    static void SetMasterIndex(int idx){
+        if(idx<0||_slaveWindows==null||idx>=_slaveWindows.Length)return;
+        var hwnd=_slaveWindows[idx];
+        if(hwnd==IntPtr.Zero||!IsWindow(hwnd))return;
+        MasterHwnd=hwnd;
+        MasterPort=(idx<_slaves.Length)?_slaves[idx]:0;
+        uint pid; GetWindowThreadProcessId(hwnd,out pid);
+        MasterPid=(int)pid;
+    }
+    static bool RefreshMasterFromForeground(){
+        int idx=ManagedIndexByHwnd(GetForegroundWindow());
+        if(idx>=0){SetMasterIndex(idx);return true;}
+        return false;
+    }
+    static bool RefreshMasterFromPoint(POINT pt){
+        if(!HasManagedWindows())return MasterHwnd!=IntPtr.Zero;
+        var fg=GetForegroundWindow();
+        int fgIdx=ManagedIndexByHwnd(fg);
+        if(fgIdx>=0&&WindowContainsPoint(_slaveWindows[fgIdx],pt)){SetMasterIndex(fgIdx);return true;}
+        var under=WindowFromPoint(pt);
+        var root=under==IntPtr.Zero?IntPtr.Zero:GetAncestor(under,2);
+        int idx=ManagedIndexByHwnd(root);
+        if(idx>=0){SetMasterIndex(idx);return true;}
+        for(int i=0;i<_slaveWindows.Length;i++){
+            if(WindowContainsPoint(_slaveWindows[i],pt)){SetMasterIndex(i);return true;}
+        }
+        return false;
+    }
     static IntPtr CB(int n,IntPtr w,IntPtr l){
-        if(n>=0&&MasterHwnd!=IntPtr.Zero){
+        if(n>=0){
             var ms=(MSLL)Marshal.PtrToStructure(l,typeof(MSLL));
+            if(!RefreshMasterFromPoint(ms.pt))return CallNextHookEx(_mhook,n,w,l);
+            if(MasterHwnd==IntPtr.Zero)return CallNextHookEx(_mhook,n,w,l);
             RECT r,cr; int t=w.ToInt32();
             if(GetWindowRect(MasterHwnd,out r)&&GetClientRect(MasterHwnd,out cr)){
                 POINT cp=new POINT{x=ms.pt.x,y=ms.pt.y};
@@ -201,7 +261,9 @@ public class MouseSync {
         return CallNextHookEx(_mhook,n,w,l);
     }
     static IntPtr KbdCB(int n,IntPtr w,IntPtr l){
-        if(n>=0&&MasterPid>0){
+        if(n>=0){
+            RefreshMasterFromForeground();
+            if(MasterPid<=0)return CallNextHookEx(_khook,n,w,l);
             uint fp; GetWindowThreadProcessId(GetForegroundWindow(),out fp);
             if((int)fp==MasterPid){
                 var kb=(KBDLL)Marshal.PtrToStructure(l,typeof(KBDLL));
@@ -232,7 +294,7 @@ public class MouseSync {
         foreach(var c in _wsCon.Values){try{c.Dispose();}catch{}} _wsCon.Clear();
         _ra=true; _rt=new Thread(Relay){IsBackground=true}; _rt.Start();
     }
-    public static void StopAll(){lock(_hookLock){_wantMouse=false;_wantKbd=false;StopHookThread();}_ra=false;}
+    public static void StopAll(){lock(_hookLock){_wantMouse=false;_wantKbd=false;StopHookThread();}_ra=false;MasterHwnd=IntPtr.Zero;MasterPid=0;MasterPort=0;_slaves=new int[0];_slaveWindows=new IntPtr[0];}
     static string GetWsUrl(int port){
         try{
             var req=(HttpWebRequest)WebRequest.Create("http://127.0.0.1:"+port+"/json");
@@ -455,6 +517,7 @@ public class MouseSync {
                     var port=_slaves[i];
                     try{
                         IntPtr hwnd=(i<_slaveWindows.Length)?_slaveWindows[i]:IntPtr.Zero;
+                        if(port==MasterPort||(hwnd!=IntPtr.Zero&&hwnd==MasterHwnd))continue;
                         if(DispatchWinMouse(hwnd,e))continue;
                         if(e.InPage==0)continue;
                         var ws=EnsureConn(port);if(ws==null)continue;
@@ -470,6 +533,7 @@ public class MouseSync {
                     var port=_slaves[i];
                     try{
                         IntPtr hwnd=(i<_slaveWindows.Length)?_slaveWindows[i]:IntPtr.Zero;
+                        if(port==MasterPort||(hwnd!=IntPtr.Zero&&hwnd==MasterHwnd))continue;
                         if(DispatchWinKey(hwnd,ke))continue;
                         var ws=EnsureConn(port);if(ws==null)continue;
                         DispatchKey(ws,ke);
@@ -938,7 +1002,7 @@ Load-Settings
 [xml]$MainXaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Chrome 多开管理器 v1.0"
+        Title="Chrome 多开管理器 v1.0.8"
         Height="740" Width="1120" MinHeight="580" MinWidth="900"
         Background="#0f0f17" WindowStartupLocation="CenterScreen"
         FontFamily="Microsoft YaHei UI" FontSize="13">
@@ -1041,7 +1105,7 @@ Load-Settings
         <Ellipse Width="10" Height="10" Fill="#82b4ff" Margin="0,0,10,0"/>
         <TextBlock Text="Chrome" FontSize="19" FontWeight="Bold" Foreground="#82b4ff" VerticalAlignment="Center"/>
         <TextBlock Text=" 多开管理器" FontSize="19" Foreground="#c0c0d8" VerticalAlignment="Center"/>
-        <TextBlock Text="  v1.0" FontSize="10" Foreground="#3a3a58" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
+        <TextBlock Text="  v1.0.8" FontSize="10" Foreground="#3a3a58" VerticalAlignment="Bottom" Margin="0,0,0,2"/>
       </StackPanel>
       <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
         <Border Background="#183d22" CornerRadius="5" Padding="12,5" Margin="0,0,8,0">
@@ -1443,13 +1507,30 @@ $script:syncActive = $false
 function Get-RunningProfiles {
     return @($script:profiles | Where-Object { Is-Running $_ })
 }
+function Resolve-ForegroundProfile {
+    try {
+        $fgHwnd = [MouseSync]::GetForegroundHwnd()
+        $fgPid = [MouseSync]::GetForegroundPid()
+        foreach ($p in (Get-RunningProfiles)) {
+            $hwnd = Get-ProfileWindowHandle $p
+            if ($hwnd -ne [IntPtr]::Zero -and $hwnd -eq $fgHwnd) { return $p }
+            if ($fgPid -gt 0 -and $p.pid -and [int]$p.pid -eq $fgPid) { return $p }
+        }
+    } catch {}
+    return $null
+}
 function Resolve-SyncMaster {
     $sel = Get-SelectedProfiles
-    $selectedRunning = @($sel | Where-Object { Is-Running $_ })
-    if ($selectedRunning.Count -gt 0) { return $selectedRunning[0] }
+    foreach ($p in @($sel)) {
+        if ((Is-Running $p) -and (Get-ProfileWindowHandle $p) -ne [IntPtr]::Zero) { return $p }
+    }
+    $fg = Resolve-ForegroundProfile
+    if ($fg) { return $fg }
     if ($script:syncMaster -and (Is-Running $script:syncMaster)) { return $script:syncMaster }
     $running = Get-RunningProfiles
-    if ($running.Count -gt 0) { return $running[0] }
+    foreach ($p in @($running)) {
+        if ((Get-ProfileWindowHandle $p) -ne [IntPtr]::Zero) { return $p }
+    }
     return $null
 }
 function Set-SyncMaster([PSCustomObject]$p) {
@@ -1461,6 +1542,8 @@ function Set-SyncMaster([PSCustomObject]$p) {
         return $false
     }
     [MouseSync]::MasterPid = [int]$p.pid
+    [MouseSync]::MasterPort = [int]$p.debugPort
+    Write-AppLog ("SyncMaster name={0} id={1} port={2} pid={3} hwnd={4}" -f $p.name,$p.id,$p.debugPort,$p.pid,[MouseSync]::MasterHwnd)
     return $true
 }
 
@@ -1479,21 +1562,22 @@ $btnSyncMouse.Add_Click({
         $btnSyncMouse.Background = "#252535"
         $btnSyncMouse.Foreground = "#c0c0d8"
         Set-Status "同步已停止。"
+        Write-AppLog "Sync stopped"
         return
     }
     $master = Resolve-SyncMaster
     if (-not $master) { [System.Windows.MessageBox]::Show("没有运行中的窗口。请先启动至少两个配置。","提示") | Out-Null; return }
     if (-not (Set-SyncMaster $master)) { return }
-    $slaveProfiles = @($script:profiles | Where-Object { $_.id -ne $script:syncMaster.id -and (Is-Running $_) })
-    $slavePorts = [int[]]@($slaveProfiles | ForEach-Object { [int]$_.debugPort })
-    $slaveHwnds = [IntPtr[]]@($slaveProfiles | ForEach-Object { Get-ProfileWindowHandle $_ })
-    if ($slavePorts.Count -eq 0) {
+    $syncProfiles = Get-RunningProfiles
+    $syncPorts = [int[]]@($syncProfiles | ForEach-Object { [int]$_.debugPort })
+    $syncHwnds = [IntPtr[]]@($syncProfiles | ForEach-Object { Get-ProfileWindowHandle $_ })
+    if ($syncPorts.Count -lt 2) {
         [System.Windows.MessageBox]::Show("没有可同步的从控窗口。请至少再启动一个配置。","提示") | Out-Null
         return
     }
-    $slaveWindowCount = @($slaveHwnds | Where-Object { $_ -ne [IntPtr]::Zero }).Count
-    if ($slaveWindowCount -eq 0) {
-        [System.Windows.MessageBox]::Show("找不到从控 Chrome 窗口句柄，请确认从控窗口可见后再开启同步。","提示") | Out-Null
+    $syncWindowCount = @($syncHwnds | Where-Object { $_ -ne [IntPtr]::Zero }).Count
+    if ($syncWindowCount -lt 2) {
+        [System.Windows.MessageBox]::Show("找不到足够的 Chrome 窗口句柄，请确认至少两个运行窗口可见后再开启同步。","提示") | Out-Null
         return
     }
     # Auto-detect Chrome UI height via window.screenY
@@ -1512,11 +1596,12 @@ $btnSyncMouse.Add_Click({
         return
     }
     $script:syncActive = $true
-    [MouseSync]::StartRelay($slavePorts,$slaveHwnds)
-    $btnSyncMouse.Content = "◉  同步中 ($($script:syncMaster.name))"
+    [MouseSync]::StartRelay($syncPorts,$syncHwnds)
+    $btnSyncMouse.Content = "◉  同步中 (自动主控)"
     $btnSyncMouse.Background = "#183d22"
     $btnSyncMouse.Foreground = "#7dd87d"
-    Set-Status "整窗鼠标+键盘同步已开启，主控: $($script:syncMaster.name)，从控窗口: $slaveWindowCount/$($slavePorts.Count) 个。再次点击停止"
+    Set-Status "整窗鼠标+键盘同步已开启，主控会跟随当前操作的运行窗口，可同步窗口: $syncWindowCount/$($syncPorts.Count) 个。再次点击停止"
+    Write-AppLog ("Sync started initialMaster={0} windows={1}/{2} ports={3}" -f $script:syncMaster.name,$syncWindowCount,$syncPorts.Count,($syncPorts -join ","))
 })
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
