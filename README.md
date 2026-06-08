@@ -29,6 +29,8 @@ Native macOS package:
 
 [Chrome多开管理器_mac_发布版.zip](https://github.com/cryptoresetlife/chrome-multi-manager/raw/main/Chrome%E5%A4%9A%E5%BC%80%E7%AE%A1%E7%90%86%E5%99%A8_mac_%E5%8F%91%E5%B8%83%E7%89%88.zip)
 
+The current public macOS package is an ad-hoc signed test package unless the repository is configured with Apple Developer ID signing secrets. macOS Gatekeeper may block ad-hoc packages with "Apple cannot verify this app". For a customer-facing release, use a Developer ID Application certificate and notarization as described below.
+
 Run the native macOS app from source:
 
 ```bash
@@ -103,6 +105,32 @@ NOTARY_PROFILE="your-notarytool-keychain-profile" \
 ```
 
 Apple requires the user to approve Input Monitoring and Accessibility. The app can open the right Settings panes and explain which app to add, but it cannot silently grant those permissions. Once the Developer ID signed build is approved by the user, normal updates keep the same signing identity and should not require re-adding the app.
+
+## macOS Release Signing
+
+To publish a macOS package that opens normally after download, the app must be signed with an Apple Developer ID Application certificate and notarized by Apple. Ad-hoc signing is only suitable for local testing.
+
+Configure these GitHub repository secrets before running the `Build macOS Package` workflow:
+
+```text
+MACOS_CERTIFICATE_P12_BASE64
+MACOS_CERTIFICATE_PASSWORD
+APPLE_ID
+APPLE_TEAM_ID
+APPLE_APP_SPECIFIC_PASSWORD
+```
+
+`MACOS_CERTIFICATE_P12_BASE64` is the base64 text of an exported `Developer ID Application` `.p12` certificate. On macOS:
+
+```bash
+base64 -i DeveloperIDApplication.p12 | pbcopy
+```
+
+`APPLE_APP_SPECIFIC_PASSWORD` is an app-specific password from the Apple ID account used for notarization. After these secrets are set, re-run the workflow. The generated `Chrome多开管理器_mac_发布版.zip` should pass:
+
+```bash
+spctl -a -vv --type execute "Chrome 多开管理器.app"
+```
 
 Windows low-memory mode is available from the left sidebar. It is saved locally and only affects newly started Chrome windows. It disables Chrome extensions and several background services, limits renderer processes, and reduces media/disk cache sizes.
 
