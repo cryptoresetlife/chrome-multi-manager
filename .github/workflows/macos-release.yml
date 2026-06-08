@@ -107,4 +107,5 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github .gitignore Package.swift README.md Sources mac script "Chrome多开管理器_mac_发布版.zip"
           git commit -m "Add native macOS app package [skip macos package]"
+          git pull --rebase origin main
           git push
